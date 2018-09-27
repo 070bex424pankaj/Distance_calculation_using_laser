@@ -1,0 +1,259 @@
+#! /usr/bin/env python
+import sys
+import argparse
+import cv2
+import numpy as np
+import math
+import RPi.GPIO as GPIO
+import time
+
+
+
+class laserspot(object):
+
+    def __init__(self, hue_min, hue_max, sat_min, sat_max, val_min, val_max):
+
+        self.hue_min = hue_min
+        self.hue_max = hue_max
+        self.sat_min = sat_min
+        self.sat_max = sat_max
+        self.val_min = val_min
+        self.val_max = val_max
+
+        self.channels = {
+            'hue': None,
+            'saturation': None,
+            'value': None,
+            'laser': None,
+            }
+
+
+    def camera_capture(self):
+
+        self.capture = cv2.VideoCapture(0)
+        return self.capture
+
+    def handle_quit(self):
+
+        cv2.waitKey(1) & 0xFF == ord('q')
+
+
+    def template_matching(self, frame) :
+
+        img = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
+        template = cv2.imread('messi_face.jpg',0)
+        w, h = template.shape[::-1]
+        res = cv2.matchTemplate(img,template,cv2.TM_CCORR_NORMED)
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+        top_left = max_loc
+        bottom_right = (top_left[0] + w, top_left[1] + h)
+        cv2.rectangle(img,top_left, bottom_right, 255, 2)
+        cv2.imshow('template', img)
+        
+        
+    
+    
+    
+
+    def threshold_image(self, channel):
+
+
+        if channel == "hue":
+            minimum = self.hue_min
+            maximum = self.hue_max
+        elif channel == "saturation":
+            minimum = self.sat_min
+            maximum = self.sat_max
+        elif channel == "value":
+            minimum = self.val_min
+            maximum = self.val_max
+
+        (t, tmp) = cv2.threshold(
+            self.channels[channel],  
+            maximum,  
+            0,  
+            cv2.THRESH_TOZERO_INV  
+        )
+
+        (t, self.channels[channel]) = cv2.threshold(
+            tmp,  
+            minimum,  
+            255, 
+            cv2.THRESH_BINARY  
+        )
+
+
+        if channel == 'hue':
+            
+            self.channels['hue'] = cv2.bitwise_not(self.channels['hue'])
+
+
+    def find(self, frame ,mask ,gray ,img2 ,p):
+
+
+        center = None
+        radius = 0
+        x = 0
+        #res = cv2.bitwise_and(frame,frame, mask= mask)
+        #cv2.imshow('res', res)
+        
+        countours = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                     cv2.CHAIN_APPROX_SIMPLE)[-2]
+
+        #self.template_matching(frame)
+
+    
+
+        
+        if len(countours) > 0:
+            
+            c = max(countours, key=cv2.contourArea)
+            ((a, b), radius) = cv2.minEnclosingCircle(c)
+            moments = cv2.moments(c)
+            
+            
+            
+        if radius > 1 :
+            if moments["m00"] > 0:
+                x = int(moments["m10"] / moments["m00"])
+                y = int(moments["m01"] / moments["m00"])
+
+               
+                
+                cv2.circle(frame, (int(x), int(y)), int(radius),(0, 255, 255), 2)
+                cv2.circle(frame, center, 5, (0, 0, 255), -1)
+                #cv2.circle(img2, (int(x), int(y)), int(radius),(0, 255, 255), 2)
+                #cv2.circle(img2, center, 5, (0, 0, 255), -1)
+
+                gray1 = gray[y-20:y+20, x-20:x+20 ]
+                (minVal, maxVal, minLoc, maxLoc) = cv2.minMaxLoc(gray1)
+                cv2.circle(gray, maxLoc, 5, (0, 0, 255), 2)
+                #cv2.imshow('gray', gray)                
+        
+        self.distance(x, p)
+    
+    def distance(self,f, p):
+        
+        global dist
+        global obj_dist
+        dist = abs(f - 0)
+        print " dist from center pixel is " + str(dist)
+        theta = -0.00161*dist + 0.44760
+        tan_theta = math.tan(theta)
+        if tan_theta > 0: # error checking
+            obj_dist =  int(8 / tan_theta)
+            print "[12;0H" + "the dot is " + str(obj_dist) + "cm  away"
+
+        global duty
+
+        if int(obj_dist) > 16:
+           duty = 132.1*math.exp(-0.02*int(obj_dist))
+           p.ChangeDutyCycle(duty)
+        else:
+           p.ChangeDutyCycle(0)
+
+    def detect(self, frame, img2, p):
+
+        hsv_img = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        #brightness check
+        h, s, v = cv2.split(hsv_img)
+        c = np.mean(v)
+        print c
+        '''
+        #correctnes check
+        if c > 150 :
+            
+            a = np.double(hsv_img)
+            b = a - 25
+            hsv_img = np.uint8(b)
+        '''
+        self.channels['hue'] = h
+        self.channels['saturation'] = s
+        self.channels['value'] = v
+
+        
+        self.threshold_image("hue")
+        self.threshold_image("saturation")
+        self.threshold_image("value")
+
+        
+        self.channels['laser'] = cv2.bitwise_and(
+            self.channels['hue'],
+            self.channels['value']
+        )
+        self.channels['laser'] = cv2.bitwise_and(
+            self.channels['saturation'],
+            self.channels['laser']
+        )
+
+        
+        hsv_image = cv2.merge([
+            self.channels['hue'],
+            self.channels['saturation'],
+            self.channels['value'],
+        ])
+
+        self.find(frame, self.channels['laser'], gray, img2, p)
+        
+        
+
+        return hsv_image
+    
+
+
+    def display(self, img, frame, img2):
+        """Display the combined image and (optionally) all other image channels
+        NOTE: default color space in OpenCV is BGR.
+        """
+        #cv2.imshow('RGB_VideoFrame', frame)
+        cv2.imshow('RGB', img2)
+        #cv2.imshow('LaserPointer', self.channels['laser'])
+
+
+    
+
+
+
+
+    def run(self, p):
+        
+        self.camera_capture()
+
+        while True:
+            # 1. capture the current image
+            success, region = self.capture.read()
+            img2 = region[0:480, 0:640]
+            img = region[150:250, 0:300]
+            
+            frame = cv2.GaussianBlur(img,(5,5),0)
+            
+            #frame = cv2.Canny(img,100,200)
+            #cv2.imshow('edge', frame)
+            
+            if not success:  # no image captured... end the processing
+                sys.stderr.write("Could not read camera frame. Quitting\n")
+                sys.exit(1)
+
+            hsv_image = self.detect(frame, img2, p)
+            self.display(hsv_image, frame, img2)
+            self.handle_quit()
+
+
+if __name__ == '__main__':
+    GPIO.setmode(GPIO.BOARD)
+    GPIO.setup(12, GPIO.OUT)
+    p = GPIO.PWM(12, 100)
+    p.start(50)
+
+
+    
+    l = laserspot(20, 160, 100, 255, 200, 255)
+    try:
+        l.run(p)
+
+    except KeyboardInterrupt:
+        pass
+    p.stop()
+    GPIO.cleanup()
